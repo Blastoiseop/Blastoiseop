@@ -1,20 +1,22 @@
 # main.py
 # Fully working Telegram EMA200 15m scanner
 # Works on Python 3.13 + Railway (no event loop errors)
+# Uses data-api.binance.vision (Railway-friendly)
 
 import asyncio
 import time
 from typing import List, Dict
 import aiohttp
 
-# ---- Your Provided Values ----
+# ---- Your Values ----
 TELEGRAM_BOT_TOKEN = "8420434829:AAFvBIh9iD_hhcDjsXg70xst8RNGLuGPtYc"
 TELEGRAM_CHAT_ID = "966269191"
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-BINANCE_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
+# ---- FIXED ENDPOINTS (Railway compatible) ----
+BINANCE_EXCHANGE_INFO = "https://data-api.binance.vision/api/v3/exchangeInfo"
+BINANCE_KLINES = "https://data-api.binance.vision/api/v3/klines"
 TELEGRAM_SEND = "https://api.telegram.org/bot{token}/sendMessage"
 
 # CONFIG
@@ -49,29 +51,26 @@ def relation_to_ema(close: float, ema: float):
     return 0
 
 
-# ---- MAIN SCANNER CLASS ----
+# ---- SCANNER ----
 class EMA200Scanner:
     def __init__(self):
         self.last_relation: Dict[str, int] = {}
         self.symbols: List[str] = []
         self.semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
 
-    # ---- FETCH USDT SYMBOLS ----
     async def fetch_usdt_symbols(self):
-        async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=False)
-        ) as session:
-            async with session.get(BINANCE_EXCHANGE_INFO, headers=HEADERS) as resp:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
+            async with s.get(BINANCE_EXCHANGE_INFO, headers=HEADERS) as r:
                 try:
-                    data = await resp.json()
+                    data = await r.json()
                 except:
                     print("Error decoding exchangeInfo")
                     return []
 
         syms = []
-        for s in data.get("symbols", []):
-            if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT":
-                syms.append(s["symbol"])
+        for sym in data.get("symbols", []):
+            if sym.get("status") == "TRADING" and sym.get("quoteAsset") == "USDT":
+                syms.append(sym["symbol"])
 
         syms.sort()
 
@@ -82,37 +81,30 @@ class EMA200Scanner:
         print(f"Discovered {len(syms)} USDT symbols.")
         return syms
 
-    # ---- FETCH KLINES ----
     async def fetch_klines(self, symbol):
         params = {"symbol": symbol, "interval": TIMEFRAME, "limit": KLIMIT}
 
         async with self.semaphore:
-            async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(ssl=False)
-            ) as session:
-                async with session.get(BINANCE_KLINES, params=params, headers=HEADERS) as resp:
-                    if resp.status != 200:
-                        print(f"Klines error {resp.status} for {symbol}")
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
+                async with s.get(BINANCE_KLINES, params=params, headers=HEADERS) as r:
+                    if r.status != 200:
+                        print(f"Klines error {r.status} for {symbol}")
                         return []
                     try:
-                        return await resp.json()
+                        return await r.json()
                     except:
                         return []
 
-    # ---- SEND TELEGRAM ----
     async def send_telegram(self, text):
         url = TELEGRAM_SEND.format(token=TELEGRAM_BOT_TOKEN)
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
 
-        async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=False)
-        ) as session:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
             try:
-                await session.post(url, json=payload, headers=HEADERS)
-            except:
-                print("Telegram send failed")
+                await s.post(url, json=payload, headers=HEADERS)
+            except Exception as e:
+                print("Telegram send failed:", e)
 
-    # ---- PROCESS SYMBOL ----
     async def handle_symbol(self, symbol):
         kl = await self.fetch_klines(symbol)
         if not kl:
@@ -128,26 +120,24 @@ class EMA200Scanner:
         rel = relation_to_ema(last_close, last_ema)
         prev_rel = self.last_relation.get(symbol, 0)
 
-        # Skip first detection
         if prev_rel == 0:
             self.last_relation[symbol] = rel
             return
 
         if rel != prev_rel and rel != 0:
             direction = "ABOVE" if rel == 1 else "BELOW"
-            msg = f"{symbol} CLOSED {direction} EMA{EMA_LEN} — {last_close}"
+            msg = f"{symbol} CLOSED {direction} EMA{EMA_LEN}\nClose: {last_close}"
             print("Alert:", msg)
             await self.send_telegram(msg)
 
         self.last_relation[symbol] = rel
 
-    # ---- BATCH RUN ----
     async def run_scan_once(self):
         tasks = [asyncio.create_task(self.handle_symbol(s)) for s in self.symbols]
         await asyncio.gather(*tasks)
 
 
-# ---- ALIGN TO 15M ----
+# ---- 15m Alignment ----
 async def align_to_next_15m():
     now = time.time()
     gm = time.gmtime(now)
