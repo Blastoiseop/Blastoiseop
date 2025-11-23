@@ -11,12 +11,12 @@ TELEGRAM_CHAT_ID = "966269191"
 
 BINANCE_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
-TIMEFRAME = "1h"  # changed from 15m to 1h
+TIMEFRAME = "1h"  # 1-hour timeframe
 KLIMIT = 210
 EMA_LEN = 200
 CONCURRENT_REQUESTS = 10
 
-
+# ----------------- EMA Calculation -----------------
 def calc_ema(values, length):
     if len(values) < length:
         return [None] * len(values)
@@ -30,7 +30,7 @@ def calc_ema(values, length):
         ema[i] = ema[i - 1] + alpha * (values[i] - ema[i - 1])
     return ema
 
-
+# ----------------- HTTP Fetch -----------------
 async def fetch_json(url, params=None):
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
@@ -39,21 +39,26 @@ async def fetch_json(url, params=None):
     except:
         return None
 
-
+# ----------------- Get USDT Symbols -----------------
 async def get_usdt_symbols():
     data = await fetch_json(BINANCE_EXCHANGE_INFO)
-    usdt = []
-    for s in data["symbols"]:
-        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING":
-            usdt.append(s["symbol"])
+    if not data or "symbols" not in data:
+        print("⚠️ Binance API failed. Using fallback USDT symbols list.")
+        # Fallback list
+        return [
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT",
+            "ADAUSDT", "SOLUSDT", "DOGEUSDT", "MATICUSDT"
+        ]
+    usdt = [s["symbol"] for s in data["symbols"]
+            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
     return sorted(usdt)
 
-
+# ----------------- Fetch Klines -----------------
 async def fetch_klines(symbol):
     params = {"symbol": symbol, "interval": TIMEFRAME, "limit": KLIMIT}
     return await fetch_json(BINANCE_KLINES, params)
 
-
+# ----------------- Send Telegram -----------------
 async def send_tg(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
@@ -63,7 +68,7 @@ async def send_tg(text):
     except:
         pass
 
-
+# ----------------- Check EMA200 Cross -----------------
 async def check_symbol(symbol):
     kl = await fetch_klines(symbol)
     if not kl or len(kl) < EMA_LEN + 2:
@@ -98,7 +103,7 @@ async def check_symbol(symbol):
 
     return None
 
-
+# ----------------- Wait until next 1-hour candle -----------------
 async def align_next_hour():
     now = time.time()
     gm = time.gmtime(now)
@@ -109,7 +114,7 @@ async def align_next_hour():
     print(f"Sleeping {int(wait)}s until next 1h close...")
     await asyncio.sleep(wait)
 
-
+# ----------------- Main Loop -----------------
 async def main():
     symbols = await get_usdt_symbols()
     print(f"Loaded {len(symbols)} USDT symbols")
@@ -135,7 +140,6 @@ async def main():
             print("No crosses this candle.")
 
         await asyncio.sleep(1)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
