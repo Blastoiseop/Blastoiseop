@@ -1,22 +1,34 @@
-# EMA200 Cross Scanner (1h) – Railway friendly, pandas_ta, robust
+# EMA200 Cross Scanner (Continuous) – 1H
 # Every 1h, after the candle closes, sends ONE Telegram message
 # listing all coins where the latest closed 1h candle crosses EMA200.
 
 import asyncio
 import aiohttp
 import time
-import pandas as pd
-import pandas_ta as ta
 
 TELEGRAM_BOT_TOKEN = "8420434829:AAFvBIh9iD_hhcDjsXg70xst8RNGLuGPtYc"
 TELEGRAM_CHAT_ID = "966269191"
 
 BINANCE_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
-TIMEFRAME = "1h"
-KLIMIT = 250  # >= 200 for EMA200
+TIMEFRAME = "1h"  # changed from 15m to 1h
+KLIMIT = 210
 EMA_LEN = 200
-RETRIES = 3  # Binance API retry count
+CONCURRENT_REQUESTS = 10
+
+
+def calc_ema(values, length):
+    if len(values) < length:
+        return [None] * len(values)
+
+    ema = [None] * len(values)
+    seed = sum(values[:length]) / length
+    ema[length - 1] = seed
+
+    alpha = 2 / (length + 1)
+    for i in range(length, len(values)):
+        ema[i] = ema[i - 1] + alpha * (values[i] - ema[i - 1])
+    return ema
 
 
 async def fetch_json(url, params=None):
@@ -24,25 +36,17 @@ async def fetch_json(url, params=None):
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
             async with s.get(url, params=params) as r:
                 return await r.json()
-    except Exception as e:
-        print(f"Fetch JSON error: {e}")
+    except:
         return None
 
 
-async def get_usdt_symbols(retries=RETRIES):
-    for attempt in range(retries):
-        data = await fetch_json(BINANCE_EXCHANGE_INFO)
-        if data and "symbols" in data:
-            usdt = [
-                s["symbol"]
-                for s in data["symbols"]
-                if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
-            ]
-            return sorted(usdt)
-        else:
-            print(f"Failed to get symbols. Retrying {attempt+1}/{retries}...")
-            await asyncio.sleep(2)
-    raise Exception("Unable to fetch USDT symbols from Binance API.")
+async def get_usdt_symbols():
+    data = await fetch_json(BINANCE_EXCHANGE_INFO)
+    usdt = []
+    for s in data["symbols"]:
+        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING":
+            usdt.append(s["symbol"])
+    return sorted(usdt)
 
 
 async def fetch_klines(symbol):
@@ -56,8 +60,8 @@ async def send_tg(text):
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
             await s.post(url, json=payload)
-    except Exception as e:
-        print(f"Telegram send error: {e}")
+    except:
+        pass
 
 
 async def check_symbol(symbol):
@@ -65,11 +69,9 @@ async def check_symbol(symbol):
     if not kl or len(kl) < EMA_LEN + 2:
         return None
 
-    closes = pd.Series([float(k[4]) for k in kl])
+    closes = [float(k[4]) for k in kl]
     close_times = [int(k[6]) for k in kl]
-
-    # EMA200 using pandas_ta
-    ema_list = ta.ema(closes, length=EMA_LEN).values
+    ema_list = calc_ema(closes, EMA_LEN)
 
     last = len(closes) - 1
     prev = last - 1
@@ -105,23 +107,16 @@ async def align_next_hour():
     if wait < 0:
         wait += 3600
     print(f"Sleeping {int(wait)}s until next 1h close...")
-    try:
-        await asyncio.sleep(wait)
-    except asyncio.CancelledError:
-        print("Sleep cancelled. Exiting...")
-        return
+    await asyncio.sleep(wait)
 
 
 async def main():
-    try:
-        symbols = await get_usdt_symbols()
-        print(f"Loaded {len(symbols)} USDT symbols")
-    except Exception as e:
-        print(f"Error loading symbols: {e}")
-        return
+    symbols = await get_usdt_symbols()
+    print(f"Loaded {len(symbols)} USDT symbols")
 
     while True:
         await align_next_hour()
+
         print("Checking EMA200 crosses...")
 
         tasks = [asyncio.create_task(check_symbol(sym)) for sym in symbols]
@@ -143,7 +138,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nBot stopped manually.")
+    asyncio.run(main())
