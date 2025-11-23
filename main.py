@@ -1,4 +1,4 @@
-# EMA200 Cross Scanner (1h) using pandas_ta – Railway friendly
+# EMA200 Cross Scanner (1h) – Railway friendly, pandas_ta, robust
 # Every 1h, after the candle closes, sends ONE Telegram message
 # listing all coins where the latest closed 1h candle crosses EMA200.
 
@@ -16,6 +16,7 @@ BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 TIMEFRAME = "1h"
 KLIMIT = 250  # >= 200 for EMA200
 EMA_LEN = 200
+RETRIES = 3  # Binance API retry count
 
 
 async def fetch_json(url, params=None):
@@ -23,17 +24,25 @@ async def fetch_json(url, params=None):
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
             async with s.get(url, params=params) as r:
                 return await r.json()
-    except:
+    except Exception as e:
+        print(f"Fetch JSON error: {e}")
         return None
 
 
-async def get_usdt_symbols():
-    data = await fetch_json(BINANCE_EXCHANGE_INFO)
-    usdt = []
-    for s in data["symbols"]:
-        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING":
-            usdt.append(s["symbol"])
-    return sorted(usdt)
+async def get_usdt_symbols(retries=RETRIES):
+    for attempt in range(retries):
+        data = await fetch_json(BINANCE_EXCHANGE_INFO)
+        if data and "symbols" in data:
+            usdt = [
+                s["symbol"]
+                for s in data["symbols"]
+                if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+            ]
+            return sorted(usdt)
+        else:
+            print(f"Failed to get symbols. Retrying {attempt+1}/{retries}...")
+            await asyncio.sleep(2)
+    raise Exception("Unable to fetch USDT symbols from Binance API.")
 
 
 async def fetch_klines(symbol):
@@ -47,8 +56,8 @@ async def send_tg(text):
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s:
             await s.post(url, json=payload)
-    except:
-        pass
+    except Exception as e:
+        print(f"Telegram send error: {e}")
 
 
 async def check_symbol(symbol):
@@ -59,7 +68,7 @@ async def check_symbol(symbol):
     closes = pd.Series([float(k[4]) for k in kl])
     close_times = [int(k[6]) for k in kl]
 
-    # Calculate EMA200 using pandas_ta
+    # EMA200 using pandas_ta
     ema_list = ta.ema(closes, length=EMA_LEN).values
 
     last = len(closes) - 1
@@ -104,8 +113,12 @@ async def align_next_hour():
 
 
 async def main():
-    symbols = await get_usdt_symbols()
-    print(f"Loaded {len(symbols)} USDT symbols")
+    try:
+        symbols = await get_usdt_symbols()
+        print(f"Loaded {len(symbols)} USDT symbols")
+    except Exception as e:
+        print(f"Error loading symbols: {e}")
+        return
 
     while True:
         await align_next_hour()
