@@ -1,12 +1,12 @@
-# EMA200 Cross Scanner (1h) using TA-Lib (matches Binance EMA)
+# EMA200 Cross Scanner (1h) using pandas_ta – Railway friendly
 # Every 1h, after the candle closes, sends ONE Telegram message
 # listing all coins where the latest closed 1h candle crosses EMA200.
 
 import asyncio
 import aiohttp
 import time
-import numpy as np
-import talib
+import pandas as pd
+import pandas_ta as ta
 
 TELEGRAM_BOT_TOKEN = "8420434829:AAFvBIh9iD_hhcDjsXg70xst8RNGLuGPtYc"
 TELEGRAM_CHAT_ID = "966269191"
@@ -14,7 +14,7 @@ TELEGRAM_CHAT_ID = "966269191"
 BINANCE_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 TIMEFRAME = "1h"
-KLIMIT = 250  # TA-Lib recommends >= 200 for EMA200
+KLIMIT = 250  # >= 200 for EMA200
 EMA_LEN = 200
 
 
@@ -56,10 +56,11 @@ async def check_symbol(symbol):
     if not kl or len(kl) < EMA_LEN + 2:
         return None
 
-    closes = np.array([float(k[4]) for k in kl])
+    closes = pd.Series([float(k[4]) for k in kl])
     close_times = [int(k[6]) for k in kl]
 
-    ema_list = talib.EMA(closes, timeperiod=EMA_LEN)
+    # Calculate EMA200 using pandas_ta
+    ema_list = ta.ema(closes, length=EMA_LEN).values
 
     last = len(closes) - 1
     prev = last - 1
@@ -95,7 +96,11 @@ async def align_next_hour():
     if wait < 0:
         wait += 3600
     print(f"Sleeping {int(wait)}s until next 1h close...")
-    await asyncio.sleep(wait)
+    try:
+        await asyncio.sleep(wait)
+    except asyncio.CancelledError:
+        print("Sleep cancelled. Exiting...")
+        return
 
 
 async def main():
@@ -125,4 +130,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nBot stopped manually.")
