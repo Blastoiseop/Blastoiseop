@@ -21,8 +21,8 @@ import aiohttp
 # Configuration (edit as needed)
 # ----------------------------
 # Prefer reading from environment; if not present, you may hard-code values here.
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")  # e.g. "123:ABC..."
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")      # e.g. "966269191"
+TELEGRAM_BOT_TOKEN = os.getenv("8420434829:AAFvBIh9iD_hhcDjsXg70xst8RNGLuGPtYc", "")  # e.g. "123:ABC..."
+TELEGRAM_CHAT_ID = os.getenv("966269191", "")      # e.g. "966269191"
 
 # Binance Futures endpoints
 FAPI_EXCHANGE_INFO = "https://fapi.binance.com/fapi/v1/exchangeInfo"
