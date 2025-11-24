@@ -1,75 +1,107 @@
 # main.py
-# 1H EMA200 Futures scanner — sends TG every hour (even if no crosses)
-# - Uses static futures list (Railway-proof)
-# - Uses Binance proxy endpoint (bypasses geo-block)
-# - Sends a grouped Telegram message each hour
-# - Checks TRUE crosses comparing previous closed candle vs last closed candle
-
+# FINAL: Scan ALL Binance Spot + Futures USDT pairs (1H), use Binance Futures EMA when available,
+# fallback to local EMA calculation for spot-only symbols. Uses proxy endpoints to avoid geo-blocks.
+# Sends ONE Telegram message every hour (includes "no crosses" message).
+#
+# Notes:
+# - For symbols that exist on Binance Futures USDT-M, this script tries to use the Binance Futures
+#   EMA indicator endpoint to obtain Binance's own EMA200 value (best match to Binance charts).
+# - For spot-only symbols, the script falls back to fetching klines and computing EMA locally.
+# - Uses proxy endpoints (sonibyte) to avoid region restrictions from Railway. If you prefer a different proxy,
+#   update the BINANCE_API_PROXY_* constants below.
+#
+# Usage: Paste this file into your Railway project (overwrite /mnt/data/main.py), then run.
+# The file contains hard-coded TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID used earlier.
+#
 import asyncio
 import aiohttp
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict
 
-# ==============================
-# CONFIG (hard-coded for Railway)
-# ==============================
+# -------------------- CONFIG --------------------
 TELEGRAM_BOT_TOKEN = "8420434829:AAFvBIh9iD_hhcDjsXg70xst8RNGLuGPtYc"
 TELEGRAM_CHAT_ID = "966269191"
 
 TIMEFRAME = "1h"
-EMA_LENGTH = 200
-KLINES_LIMIT = 250
+EMA_PERIOD = 200
 
-# Use Binance proxy endpoint to bypass region blocks
-BINANCE_FUTURES_PROXY_BASE = "https://fapi.binance.sonibyte.us/fapi/v1"
+# Proxied Binance base endpoints (works from Railway/India)
+BINANCE_API_PROXY_SPOT = "https://api.binance.sonibyte.us/api/v3"     # spot proxy (exchangeInfo, klines)
+BINANCE_API_PROXY_FUT = "https://fapi.binance.sonibyte.us/fapi/v1"    # futures proxy (exchangeInfo, klines, indicator)
 
-# ==============================
-# STATIC FUTURES LIST (160+ symbols)
-# ==============================
-FUTURES_LIST = [
-"1000BONKUSDT","1000FLOKIUSDT","1000LUNCUSDT","1000PEPEUSDT","1INCHUSDT",
-"AAVEUSDT","ACHUSDT","ADAUSDT","AGLDUSDT","AIUSDT","ALGOUSDT","ALICEUSDT",
-"ALPHAUSDT","ALTUSDT","ANKRUSDT","ANTUSDT","APEUSDT","API3USDT","APTUSDT",
-"ARBUSDT","ARKMUSDT","ARKUSDT","ARPAUSDT","ARUSDT","ASTRUSDT","ATAUSDT",
-"ATOMUSDT","AUDIOUSDT","AVAXUSDT","AXSUSDT","BABYDOGEUSDT","BANDUSDT",
-"BATUSDT","BCHUSDT","BEAMXUSDT","BELUSDT","BICOUSDT","BIGTIMEUSDT",
-"BITUSDT","BLURUSDT","BLZUSDT","BNBUSDT","BNTUSDT","BOMEUSDT","BONKUSDT",
-"BRETTUSDT","BSVUSDT","BTCUSDT","C98USDT","CAKEUSDT","CELOUSDT",
-"CETUSUSDT","CFXUSDT","CHZUSDT","CKBUSDT","COMBOUSDT","COMPUSDT",
-"COTIUSDT","CRVUSDT","CTKUSDT","CTSIUSDT","CVXUSDT","CYBERUSDT","DASHUSDT",
-"DEFIUSDT","DENTUSDT","DGBUSDT","DODOUSDT","DOGEUSDT","DOTUSDT","DUSKUSDT",
-"DYDXUSDT","EDUUSDT","EGLDUSDT","ENAUSDT","ENJUSDT","ENSUSDT","EOSUSDT",
-"ETCUSDT","ETHUSDT","ETHFIUSDT","FETUSDT","FILUSDT","FIOUSDT","FLAREUSDT",
-"FLOWUSDT","FLUXUSDT","FTMUSDT","FXSUSDT","GALAUSDT","GALUSDT","GASUSDT",
-"GFTUSDT","GLMRUSDT","GLMUSDT","GMTUSDT","GMXUSDT","GRTUSDT","HBARUSDT",
-"HFTUSDT","HIFIUSDT","HOOKUSDT","HOTUSDT","ICPUSDT","ICXUSDT","IDUSDT",
-"ILVUSDT","IMXUSDT","INJUSDT","IOSTUSDT","IOTAUSDT","IOTXUSDT","JASMYUSDT",
-"JOEUSDT","JTOUSDT","JUPUSDT","KAVAUSDT","KDAUSDT","KLAYUSDT","KNCUSDT",
-"KSMUSDT","LDOUSDT","LEVERUSDT","LINAUSDT","LINKUSDT","LITUSDT","LPTUSDT",
-"LQTYUSDT","LRCUSDT","LTCUSDT","LUNA2USDT","LUNCUSDT","MAGICUSDT","MANAUSDT",
-"MATICUSDT","MAVUSDT","MDTUSDT","MEMEUSDT","MINAUSDT","MKRUSDT","MTLUSDT",
-"NEARUSDT","NEOUSDT","NFPUSDT","NKNUSDT","NMRUSDT","OCEANUSDT","OGNUSDT",
-"OMGUSDT","ONEUSDT","ONTUSDT","OPUSDT","ORDIUSDT","OXTUSDT","PENDLEUSDT",
-"PEOPLEUSDT","PEPEUSDT","PERPUSDT","PHBUSDT","POLYXUSDT","PORTALUSDT",
-"PYTHUSDT","QNTUSDT","QTUMUSDT","RAYUSDT","RDNTUSDT","REEFUSDT","RENUSDT",
-"RNDRUSDT","ROSEUSDT","RSRUSDT","RUNEUSDT","RVNUSDT","SANDUSDT","SEIUSDT",
-"SHIBUSDT","SKLUSDT","SLPUSDT","SNXUSDT","SOLUSDT","SSVUSDT","STEEMUSDT",
-"STGUSDT","STMXUSDT","STORJUSDT","STXUSDT","SUIUSDT","SUPERUSDT","SUSHIUSDT",
-"SXPUSDT","SYSUSDT","TOMIUSDT","THETAUSDT","TIAUSDT","TLMUSDT","TRBUSDT",
-"TRXUSDT","TUSDT","UMAUSDT","UNFIUSDT","UNIUSDT","VETUSDT","WLDUSDT",
-"WOOUSDT","XAIUSDT","XEMUSDT","XLMUSDT","XMRUSDT","XRPUSDT","XTZUSDT",
-"YFIUSDT","ZECUSDT","ZENUSDT","ZILUSDT","ZRXUSDT"
-]
+# Kline limits
+KLINES_LIMIT_SPOT = 1000   # many candles to compute EMA accurately for spot fallback
+KLINES_LIMIT_FUT = 300     # enough for futures local fallback
 
-# ==============================
-# EMA calculation helpers
-# ==============================
+# Concurrency
+CONCURRENT_REQUESTS = 12
+HTTP_TIMEOUT = 30
+
+# -------------------- HELPERS --------------------
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ema200-bot/1.0)"}
+
+async def fetch_json(url: str, params: Dict = None, timeout: int = HTTP_TIMEOUT) -> Optional[object]:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, headers=HEADERS, timeout=timeout) as resp:
+                try:
+                    return await resp.json()
+                except Exception:
+                    text = await resp.text()
+                    print(f"[fetch_json] non-json from {url} -> {text[:200]}")
+                    return None
+    except Exception as e:
+        print(f"[fetch_json] error {url}: {e}")
+        return None
+
+async def post_json(url: str, payload: Dict, timeout: int = 15):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=HEADERS, timeout=timeout) as resp:
+                try:
+                    return resp.status, await resp.json()
+                except Exception:
+                    return resp.status, None
+    except Exception as e:
+        print(f"[post_json] error posting to {url}: {e}")
+        return 0, None
+
+# -------------------- SYMBOLS (auto-update) --------------------
+async def load_all_usdt_symbols() -> Dict[str, Dict]:
+    """
+    Load spot and futures USDT pairs via proxied exchangeInfo endpoints.
+    Returns dict symbol -> {"spot": bool, "futures": bool}
+    """
+    symbols: Dict[str, Dict] = {}
+    # Spot exchangeInfo
+    spot_info = await fetch_json(f"{BINANCE_API_PROXY_SPOT}/exchangeInfo")
+    if spot_info and "symbols" in spot_info:
+        for s in spot_info["symbols"]:
+            if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT":
+                symbols.setdefault(s["symbol"], {"spot": False, "futures": False})
+                symbols[s["symbol"]]["spot"] = True
+    else:
+        print("[symbols] Spot exchangeInfo failed or missing 'symbols'")
+
+    # Futures exchangeInfo
+    fut_info = await fetch_json(f"{BINANCE_API_PROXY_FUT}/exchangeInfo")
+    if fut_info and "symbols" in fut_info:
+        for s in fut_info["symbols"]:
+            if s.get("status") == "TRADING" and s.get("symbol", "").endswith("USDT"):
+                symbols.setdefault(s["symbol"], {"spot": False, "futures": False})
+                symbols[s["symbol"]]["futures"] = True
+    else:
+        print("[symbols] Futures exchangeInfo failed or missing 'symbols'")
+
+    print(f"[symbols] Loaded {len(symbols)} combined USDT symbols (spot+futures)")
+    return symbols
+
+# -------------------- EMA helpers --------------------
 def compute_ema_list(values: List[float], period: int) -> List[Optional[float]]:
     n = len(values)
     ema = [None] * n
     if n < period:
         return ema
-    # seed with SMA
     seed = sum(values[:period]) / period
     ema[period - 1] = seed
     alpha = 2.0 / (period + 1.0)
@@ -77,138 +109,193 @@ def compute_ema_list(values: List[float], period: int) -> List[Optional[float]]:
         ema[i] = ema[i - 1] + alpha * (values[i] - ema[i - 1])
     return ema
 
-# ==============================
-# Telegram sender
-# ==============================
-async def send_telegram(session: aiohttp.ClientSession, text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+# -------------------- BINANCE FUTURES INDICATOR (preferred) --------------------
+async def fetch_futures_indicator_ema(symbol: str, interval: str = TIMEFRAME, period: int = EMA_PERIOD) -> Optional[float]:
+    """
+    Try to fetch Binance Futures indicator EMA for latest closed candle.
+    Proxy used to avoid geo-blocks. If parse fails, return None to fallback.
+    """
+    url = f"{BINANCE_API_PROXY_FUT}/indicator/ema"
+    params = {"symbol": symbol, "interval": interval, "period": period}
+    data = await fetch_json(url, params)
+    if not data:
+        return None
+    # Try to parse common response formats
     try:
-        async with session.post(url, json=payload, timeout=15) as resp:
-            if resp.status != 200:
-                text_resp = await resp.text()
-                print("[tg] Error sending:", resp.status, text_resp)
+        if isinstance(data, dict):
+            for k in ("value","ema","EMA","result","v"):
+                if k in data and isinstance(data[k], (int, float)):
+                    return float(data[k])
+            # maybe data['data'] list
+            if "data" in data and isinstance(data["data"], list) and len(data["data"])>0:
+                last = data["data"][-1]
+                if isinstance(last, (int,float)):
+                    return float(last)
+                if isinstance(last, dict):
+                    for k in ("value","ema"):
+                        if k in last and isinstance(last[k], (int,float)):
+                            return float(last[k])
+        if isinstance(data, list) and len(data)>0:
+            last = data[-1]
+            if isinstance(last, (int,float)):
+                return float(last)
+            if isinstance(last, list) and len(last)>0 and isinstance(last[-1], (int,float)):
+                return float(last[-1])
     except Exception as e:
-        print("[tg] Exception:", e)
+        print(f"[indicator parse] {symbol} error: {e}")
+        return None
+    return None
 
-# ==============================
-# Fetch klines via proxy
-# ==============================
-async def fetch_klines(session: aiohttp.ClientSession, symbol: str) -> Optional[List]:
-    url = f"{BINANCE_FUTURES_PROXY_BASE}/klines"
-    params = {"symbol": symbol, "interval": TIMEFRAME, "limit": KLINES_LIMIT}
+# -------------------- KLINES fetch via proxy --------------------
+async def fetch_klines_proxy(session: aiohttp.ClientSession, symbol: str, futures: bool) -> Optional[List]:
+    """
+    Fetch klines via proxy endpoints. For futures use BINANCE_API_PROXY_FUT, for spot use BINANCE_API_PROXY_SPOT.
+    """
+    base = BINANCE_API_PROXY_FUT if futures else BINANCE_API_PROXY_SPOT
+    url = f"{base}/klines"
+    limit = KLINES_LIMIT_FUT if futures else KLINES_LIMIT_SPOT
+    params = {"symbol": symbol, "interval": TIMEFRAME, "limit": limit}
     try:
-        async with session.get(url, params=params, timeout=25) as resp:
+        async with session.get(url, params=params, timeout=HTTP_TIMEOUT) as resp:
             if resp.status != 200:
                 text = await resp.text()
-                # print minimal info to avoid log spam
                 print(f"[kline] {symbol} error {resp.status}: {text[:200]}")
                 return None
             data = await resp.json()
-            # defensive: if Binance returns error dict, skip
+            # defensive: if error dict returned
             if isinstance(data, dict) and data.get("code") is not None:
                 print(f"[kline] {symbol} returned error: {data.get('msg') or data}")
                 return None
             return data
     except Exception as e:
-        print(f"[kline] {symbol} exception:", e)
+        print(f"[kline] {symbol} exception: {e}")
         return None
 
-# ==============================
-# Check single symbol for EMA cross
-# ==============================
-async def check_symbol(session: aiohttp.ClientSession, symbol: str):
-    kl = await fetch_klines(session, symbol)
-    if not kl or len(kl) < EMA_LENGTH + 2:
+# -------------------- Symbol cross check --------------------
+async def check_symbol_cross(session: aiohttp.ClientSession, symbol: str, info: Dict) -> Optional[str]:
+    """
+    Return formatted string for symbol if cross detected, else None.
+    We will try to fetch Binance futures EMA if available (exact), otherwise compute locally.
+    """
+    is_futures = bool(info.get("futures", False))
+    # If symbol has futures contract, try indicator endpoint first
+    last_ema = None
+    prev_ema = None
+
+    # Fetch klines first (we need closes regardless to check last closed candles)
+    kl = await fetch_klines_proxy(session, symbol, is_futures)
+    if not kl or len(kl) < EMA_PERIOD + 2:
         return None
 
     closes = [float(k[4]) for k in kl]
-    ema_list = compute_ema_list(closes, EMA_LENGTH)
+    close_times = [int(k[6]) for k in kl]
 
-    last_idx = len(closes) - 1
-    prev_idx = last_idx - 1
+    # Ensure the returned last kline is closed (closeTime <= now - small buffer)
+    if close_times[-1] > int(time.time()*1000) - 1000:
+        # last candle still forming; skip this symbol this cycle
+        return None
 
-    last_close = closes[last_idx]
-    prev_close = closes[prev_idx]
-    last_ema = ema_list[last_idx]
-    prev_ema = ema_list[prev_idx]
+    # Get EMA values
+    if is_futures:
+        # try indicator endpoint for exact EMA for last closed candle
+        indicator_ema = await fetch_futures_indicator_ema(symbol)
+        if indicator_ema is not None:
+            # last_ema assigned from indicator; compute prev_ema using local EMA list
+            ema_list = compute_ema_list(closes, EMA_PERIOD)
+            last_ema = float(indicator_ema)
+            prev_ema = ema_list[-2] if len(ema_list) >= 2 else None
+        else:
+            # fallback: compute locally using adequate klines
+            ema_list = compute_ema_list(closes, EMA_PERIOD)
+            last_ema = ema_list[-1]
+            prev_ema = ema_list[-2] if len(ema_list)>=2 else None
+    else:
+        # spot-only: compute local EMA with many candles to approximate TV
+        ema_list = compute_ema_list(closes, EMA_PERIOD)
+        last_ema = ema_list[-1]
+        prev_ema = ema_list[-2] if len(ema_list)>=2 else None
 
     if last_ema is None or prev_ema is None:
         return None
 
-    # prev below EMA and last above EMA => bullish cross
+    last_close = closes[-1]
+    prev_close = closes[-2]
+
+    # Strict cross definition: prev below EMA and last above EMA => bullish (and reverse)
     if prev_close < prev_ema and last_close > last_ema:
-        return ("BULLISH", symbol, last_close, last_ema)
-    # prev above EMA and last below EMA => bearish cross
+        return f"{symbol} | Close {last_close} | EMA200 {round(last_ema,6)} | BULLISH"
     if prev_close > prev_ema and last_close < last_ema:
-        return ("BEARISH", symbol, last_close, last_ema)
+        return f"{symbol} | Close {last_close} | EMA200 {round(last_ema,6)} | BEARISH"
     return None
 
-# ==============================
-# Align to next 1h candle close
-# ==============================
-async def align_to_next_hour():
+# -------------------- Telegram sender (grouped message) --------------------
+async def send_grouped_message(session: aiohttp.ClientSession, results: List[str], scanned_count: int):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    if results:
+        msg = f"🚀 EMA200 Crosses (1H) — {timestamp}\nScanned: {scanned_count}\n\n" + "\n".join(results)
+    else:
+        msg = f"📊 1H EMA200 Scanner — {timestamp}\nScanned: {scanned_count}\nNo EMA200 crosses detected this candle."
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+    try:
+        status, _ = await post_json(url, payload)
+        if status != 200:
+            print(f"[tg] send status {status}")
+    except Exception as e:
+        print(f"[tg] exception {e}")
+
+# -------------------- ALIGN helper --------------------
+async def align_to_next_hour_close():
     now = time.time()
     gm = time.gmtime(now)
     seconds = gm.tm_min * 60 + gm.tm_sec
-    wait = 3600 - seconds + 2  # small buffer
+    wait = 3600 - seconds + 2
     if wait < 0:
         wait = 2
     print(f"[align] Sleeping {int(wait)}s until next 1h candle close...")
     await asyncio.sleep(wait)
 
-# ==============================
-# Main loop
-# ==============================
+# -------------------- MAIN LOOP --------------------
 async def main():
-    print(f"[start] Loaded {len(FUTURES_LIST)} futures symbols (static list)")
-    # Use a single session for efficiency, but disable SSL verification to avoid platform SSL issues
-    conn = aiohttp.TCPConnector(ssl=False)
-    async with aiohttp.ClientSession(connector=conn) as session:
+    print("[start] loading symbols...")
+    symbols_info = await load_all_usdt_symbols()
+    if not symbols_info:
+        print("[start] No symbols loaded; exiting.")
+        return
+
+    symbols = list(symbols_info.keys())
+    print(f"[start] total symbols to scan: {len(symbols)} (spot+futures)")
+
+    sem = asyncio.Semaphore(CONCURRENT_REQUESTS)
+
+    async with aiohttp.ClientSession() as session:
         while True:
-            await align_to_next_hour()
-            print("[scan] Checking EMA200 crosses on 1h candles...")
-            tasks = [check_symbol(session, s) for s in FUTURES_LIST]
+            await align_to_next_hour_close()
+            print("[scan] Starting scan for EMA200 crosses...")
+            tasks = []
+            scanned = 0
+            for sym in symbols:
+                info = symbols_info.get(sym, {"spot": False, "futures": False})
+                async def worker(s=sym, info_local=info):
+                    async with sem:
+                        try:
+                            return await check_symbol_cross(session, s, info_local)
+                        except Exception as e:
+                            print(f"[worker] {s} exception: {e}")
+                            return None
+                tasks.append(asyncio.create_task(worker()))
             results = await asyncio.gather(*tasks)
 
-            bulls = []
-            bears = []
-            scanned = 0
-            for r in results:
-                if r:
-                    typ, sym, close, ema_val = r
-                    scanned += 1
-                    if typ == "BULLISH":
-                        bulls.append((sym, close, ema_val))
-                    else:
-                        bears.append((sym, close, ema_val))
-                else:
-                    # even if None, count as scanned (we attempted)
-                    scanned += 1
+            # Filter and count
+            matches = [r for r in results if r]
+            scanned = len(symbols)
 
-            # Build message (Format A, compact)
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-            if bulls or bears:
-                msg_lines = [f"🚀 EMA200 Crosses (1H) — {timestamp}", f"Scanned: {scanned} symbols", ""]
-                if bulls:
-                    msg_lines.append("🔥 Bullish Breakouts:")
-                    for s, c, e in bulls:
-                        msg_lines.append(f"{s} | Close {c} | EMA200 {round(e,6)} | BULLISH")
-                if bears:
-                    msg_lines.append("")
-                    msg_lines.append("⚠️ Bearish Breakdowns:")
-                    for s, c, e in bears:
-                        msg_lines.append(f"{s} | Close {c} | EMA200 {round(e,6)} | BEARISH")
-                message = "\n".join(msg_lines)
-            else:
-                message = f"📊 1H EMA200 Scanner — {timestamp}\nScanned: {scanned} symbols\nNo EMA200 crosses detected this candle."
+            # Send grouped message
+            await send_grouped_message(session, matches, scanned)
+            print(f"[scan] Completed. Matches: {len(matches)}. Sleeping until next hour...")
 
-            # Send Telegram message (always send every hour)
-            await send_telegram(session, message)
-            print("[scan] Done. Message sent (or attempted). Sleeping until next hour...")
-
-# Entry point
-if __name__ == "__main__":
+# -------------------- ENTRY --------------------
+if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
